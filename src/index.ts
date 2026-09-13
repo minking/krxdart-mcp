@@ -27,8 +27,8 @@ export function createQueue(minIntervalMs: number) {
   };
 }
 
-const krxQueue = createQueue(100);  // KRX: 초당 최대 10회 (100ms)
-const dartQueue = createQueue(250); // DART: 초당 최대 4회 (250ms)
+const krxQueue = createQueue(200);  // KRX: 초당 최대 5회 (200ms, 안전 마진 50%)
+const dartQueue = createQueue(350); // DART: 초당 최대 약 2.8회 (350ms, IP 차단 방지 버퍼)
 
 // ============================================================================
 // 2. 한국거래소(KRX) 공식 31개 서비스 API
