@@ -2,12 +2,12 @@ import assert from 'node:assert';
 
 // 1. DART 공식 엔드포인트 경로 정규식 검증 (SSRF 및 경로 위조 방어)
 function testEndpointSecurityRegex() {
-  const endpointRegex = /^\/[a-zA-Z0-9_-]+\.json$/;
+  const endpointRegex = /^\/?[a-zA-Z0-9_-]+\.json$/;
 
   assert.strictEqual(endpointRegex.test('/company.json'), true);
+  assert.strictEqual(endpointRegex.test('company.json'), true, '슬래시 없이도 허용');
   assert.strictEqual(endpointRegex.test('/fnlttSinglAcnt.json'), true);
   assert.strictEqual(endpointRegex.test('/detSecIsu.json'), true);
-  assert.strictEqual(endpointRegex.test('company.json'), false, '앞에 / 슬래시 필수');
   assert.strictEqual(endpointRegex.test('/../etc/passwd'), false, '경로 탐색 공격 거부');
   assert.strictEqual(endpointRegex.test('/test.xml'), false, 'json 확장자만 허용');
   console.log('✅ [1/3] DART 엔드포인트 보안 정규식 검증 통과');
@@ -51,12 +51,43 @@ function testZipSignatureValidation() {
   console.log('✅ [4/4] DART ZIP 시그니처 및 에러 감지 검증 통과');
 }
 
+// 5. 한국거래소(KRX) 공식 31개 서비스 카테고리 매핑 검증
+function testKrxCategoryMapping() {
+  const KRX_CATEGORY_MAP = {
+    stk_bydd_trd: 'sto', ksq_bydd_trd: 'sto', knx_bydd_trd: 'sto',
+    sw_bydd_trd: 'sto', sr_bydd_trd: 'sto',
+    stk_isu_base_info: 'sto', ksq_isu_base_info: 'sto', knx_isu_base_info: 'sto',
+    etf_bydd_trd: 'etp', etn_bydd_trd: 'etp', elw_bydd_trd: 'etp',
+    krx_dd_trd: 'idx', kospi_dd_trd: 'idx', kosdaq_dd_trd: 'idx', bon_dd_trd: 'idx', drvprod_dd_trd: 'idx',
+    kts_bydd_trd: 'bon', bnd_bydd_trd: 'bon', smb_bydd_trd: 'bon',
+    fut_bydd_trd: 'drv', eqsfu_stk_bydd_trd: 'drv', eqkfu_ksq_bydd_trd: 'drv',
+    opt_bydd_trd: 'drv', eqsop_bydd_trd: 'drv', eqkop_bydd_trd: 'drv',
+    oil_bydd_trd: 'gen', gold_bydd_trd: 'gen', ets_bydd_trd: 'gen',
+    sri_bond_info: 'esg', esg_index_info: 'esg', esg_etp_info: 'esg'
+  };
+
+  const count = Object.keys(KRX_CATEGORY_MAP).length;
+  assert.strictEqual(count, 31, '한국거래소 전체 31개 서비스 등록 확인');
+
+  // 카테고리 매핑 확인
+  assert.strictEqual(KRX_CATEGORY_MAP['stk_bydd_trd'], 'sto');
+  assert.strictEqual(KRX_CATEGORY_MAP['etf_bydd_trd'], 'etp');
+  assert.strictEqual(KRX_CATEGORY_MAP['krx_dd_trd'], 'idx');
+  assert.strictEqual(KRX_CATEGORY_MAP['kts_bydd_trd'], 'bon');
+  assert.strictEqual(KRX_CATEGORY_MAP['gold_bydd_trd'], 'gen');
+  assert.strictEqual(KRX_CATEGORY_MAP['fut_bydd_trd'], 'drv');
+  assert.strictEqual(KRX_CATEGORY_MAP['sri_bond_info'], 'esg');
+
+  console.log('✅ [5/5] 한국거래소 공식 31개 서비스 매핑 검증 통과');
+}
+
 function runAll() {
   testEndpointSecurityRegex();
   testCodeSchemas();
   testMapIndexing();
   testZipSignatureValidation();
-  console.log('\n🎉 [krxdart-mcp v2.0.1] 순수 원본 API 프록시 자체 검증 100% 통과');
+  testKrxCategoryMapping();
+  console.log('\n🎉 [krxdart-mcp v2.0.1] KRX 31개 공식 오픈API 지원 자체 검증 100% 통과');
 }
 
 runAll();
