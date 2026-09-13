@@ -131,25 +131,27 @@ async function fetchDartDocument(rceptNo: string): Promise<unknown> {
     if (!res.ok) throw new Error(`DART 문서 다운로드 실패: ${res.status} ${res.statusText}`);
 
     const buffer = Buffer.from(await res.arrayBuffer());
-    try {
-      const zip = new AdmZip(buffer);
-      const files = zip.getEntries().map((entry) => ({
-        name: entry.entryName,
-        size: entry.header.size,
-        content: decodeDartBuffer(entry.getData())
-      }));
-      return {
-        rcept_no: rceptNo,
-        direct_url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`,
-        files
-      };
-    } catch {
-      return {
-        rcept_no: rceptNo,
-        direct_url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`,
-        content: decodeDartBuffer(buffer)
-      };
+
+    // DART는 오류 발생 시 ZIP 대신 XML 에러 메시지를 반환함 (PK 헤더: 0x50, 0x4b)
+    if (buffer.length < 2 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      const errorText = decodeDartBuffer(buffer);
+      const msgMatch = errorText.match(/<message>([^<]*)<\/message>/);
+      const statusMatch = errorText.match(/<status>([^<]*)<\/status>/);
+      const errMsg = msgMatch ? msgMatch[1] : errorText.slice(0, 300);
+      throw new Error(`[DART 문서 다운로드 실패 ${statusMatch?.[1] || 'ERROR'}] ${errMsg}`);
     }
+
+    const zip = new AdmZip(buffer);
+    const files = zip.getEntries().map((entry) => ({
+      name: entry.entryName,
+      size: entry.header.size,
+      content: decodeDartBuffer(entry.getData())
+    }));
+    return {
+      rcept_no: rceptNo,
+      direct_url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`,
+      files
+    };
   });
 }
 
@@ -257,6 +259,15 @@ async function loadCorpCodeList(): Promise<CorpItem[]> {
       if (!res.ok) throw new Error(`고유번호 파일 다운로드 실패: HTTP ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     });
+
+    // DART 키 오류 시 ZIP 대신 XML 에러 메시지 반환 감지
+    if (buffer.length < 2 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      const errorText = decodeDartBuffer(buffer);
+      const msgMatch = errorText.match(/<message>([^<]*)<\/message>/);
+      const statusMatch = errorText.match(/<status>([^<]*)<\/status>/);
+      const errMsg = msgMatch ? msgMatch[1] : errorText.slice(0, 300);
+      throw new Error(`[DART 기업목록 다운로드 실패 ${statusMatch?.[1] || 'ERROR'}] ${errMsg}`);
+    }
 
     const zip = new AdmZip(buffer);
     const xmlEntry = zip.getEntries().find((e) => e.entryName.toLowerCase().endsWith('.xml'));

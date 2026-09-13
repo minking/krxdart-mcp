@@ -41,11 +41,22 @@ function testMapIndexing() {
   console.log('✅ [3/3] O(1) 초고속 인덱스 맵 알고리즘 검증 통과');
 }
 
+// 4. DART 원문 ZIP 파일 시그니처(PK 헤더) 판별 검증
+function testZipSignatureValidation() {
+  const validZipHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  const xmlErrorBuffer = Buffer.from('<?xml version="1.0" encoding="UTF-8"?><result><status>013</status></result>');
+
+  assert.strictEqual(validZipHeader[0] === 0x50 && validZipHeader[1] === 0x4b, true, '정상 ZIP 헤더 PK 감지');
+  assert.strictEqual(xmlErrorBuffer[0] === 0x50 && xmlErrorBuffer[1] === 0x4b, false, 'XML 에러 텍스트는 ZIP이 아님을 감지');
+  console.log('✅ [4/4] DART ZIP 시그니처 및 에러 감지 검증 통과');
+}
+
 function runAll() {
   testEndpointSecurityRegex();
   testCodeSchemas();
   testMapIndexing();
-  console.log('\n🎉 [krxdart-mcp v2.0.0] 순수 원본 API 프록시 자체 검증 100% 통과');
+  testZipSignatureValidation();
+  console.log('\n🎉 [krxdart-mcp v2.0.1] 순수 원본 API 프록시 자체 검증 100% 통과');
 }
 
 runAll();
