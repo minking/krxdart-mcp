@@ -46,18 +46,16 @@ DART에서 제공하는 모든 `.json` 엔드포인트를 호출할 수 있습�
 
 ---
 
-## 클라이언트 설정 (MCP)
-
-Claude Desktop 또는 사용 중인 MCP 클라이언트 설정 파일에 등록합니다.
+## MCP 설정
 
 ```json
 {
   "mcpServers": {
     "krxdart-mcp": {
-      "command": "node",
-      "args": ["<설치경로>/krxdart-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "git+https://github.com/minking/krxdart-mcp.git"],
       "env": {
-        "DART_API_KEY": "금융감독원_OpenDART_인증키",
+        "DART_API_KEY": "금융감독원_OpenDART_API_KEY",
         "KRX_API_KEY": "한국거래소_오픈API_AUTH_KEY"
       }
     }
@@ -65,19 +63,10 @@ Claude Desktop 또는 사용 중인 MCP 클라이언트 설정 파일에 등록�
 }
 ```
 
-### 환경 변수
-* `DART_API_KEY`: [Open DART](https://opendart.fss.or.kr)에서 발급받은 인증키 (일 10,000회 무료)
-* `KRX_API_KEY`: [KRX 오픈API](https://openapi.krx.co.kr)에서 발급받은 AUTH_KEY
+* `DART_API_KEY`: [Open DART](https://opendart.fss.or.kr) 발급 키
+* `KRX_API_KEY`: [KRX 오픈API](https://openapi.krx.co.kr) 발급 키
 
 ---
-
-## 설치 및 빌드
-
-```bash
-npm install
-npm run build
-npm test
-```
 
 ## 라이선스
 MIT License
