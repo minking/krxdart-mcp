@@ -53,7 +53,7 @@ DART에서 제공하는 모든 `.json` 엔드포인트를 호출할 수 있습�
   "mcpServers": {
     "krxdart-mcp": {
       "command": "npx",
-      "args": ["-y", "git+https://github.com/minking/krxdart-mcp.git"],
+      "args": ["-y", "github:minking/krxdart-mcp"],
       "env": {
         "DART_API_KEY": "금융감독원_OpenDART_API_KEY",
         "KRX_API_KEY": "한국거래소_오픈API_AUTH_KEY"
