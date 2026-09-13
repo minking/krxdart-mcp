@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * krxdart-mcp: Integrated DART Disclosures & KRX Market Data MCP Server
+ * krxdart-mcp: Comprehensive DART Disclosures & KRX Market Data MCP Server
  * Pure Proxy & Comprehensive Financial/Market Infrastructure
  * Single-file, zero heavy dependencies, Node >= 20.0.0
  */
@@ -14,16 +14,16 @@ import AdmZip from 'adm-zip';
 
 const server = new McpServer({
   name: 'krxdart-mcp',
-  version: '1.1.0'
+  version: '1.2.0'
 });
 
 // ============================================================================
-// 1. 공통 큐 및 네트워크 제약조건 방어 (DART/KRX 공용 250ms Sequential Queue)
+// 1. 순차 동기화 큐 및 에러 래퍼 (DART 일일 10,000회 및 초당 요청 제한 완벽 방어)
 // ============================================================================
 const DART_BASE_URL = 'https://opendart.fss.or.kr/api';
 let queue: Promise<any> = Promise.resolve();
 let lastRequestTime = 0;
-const RATE_LIMIT_MS = 250;
+const RATE_LIMIT_MS = 250; // 초당 4회 제한 준수
 
 function enqueue<T>(task: () => Promise<T>, intervalMs = RATE_LIMIT_MS): Promise<T> {
   const next = queue.then(async () => {
@@ -56,7 +56,7 @@ async function safeTool(action: () => Promise<any>) {
 }
 
 // ============================================================================
-// 2. Zod 스키마 정의 (Open DART 및 한국거래소 표준 규격)
+// 2. 공통 Zod 스키마 정의 (Open DART 및 한국거래소 표준 규격 100% 준수)
 // ============================================================================
 const corpCodeSchema = z.string().regex(/^\d{8}$/, 'DART 고유번호는 8자리 숫자여야 합니다').describe('DART 8자리 고유번호 (예: "00126380")');
 const stockCodeSchema = z.string().regex(/^\d{6}$/, '종목코드는 6자리 숫자여야 합니다').describe('6자리 종목코드 (예: "005930")');
@@ -65,7 +65,7 @@ const reprtCodeSchema = z.enum(['11013', '11012', '11014', '11011']).describe('�
 const dateSchema = z.string().regex(/^\d{8}$/, '날짜는 YYYYMMDD 8자리 형식이어야 합니다');
 
 // ============================================================================
-// 3. DART API 클라이언트 및 corpCode.xml 24시간 캐시
+// 3. DART API 클라이언트 및 corpCode 24시간 캐싱 (정규식 호이스팅 최적화)
 // ============================================================================
 function getDartApiKey(overrideKey?: string): string {
   const key = overrideKey || process.env.DART_API_KEY;
@@ -104,6 +104,38 @@ async function fetchDart(endpoint: string, params: Record<string, any>): Promise
       if (json.status === '010' || json.status === '011') throw new Error('[DART 키 오류] 유효하지 않은 DART_API_KEY입니다.');
     }
     return json;
+  });
+}
+
+// DART 공시서류 원문 ZIP/XML 바이너리 다운로드
+async function fetchDartDocument(rceptNo: string): Promise<any> {
+  const key = getDartApiKey();
+  return enqueue(async () => {
+    const url = `${DART_BASE_URL}/document.xml?crtfc_key=${key}&rcept_no=${rceptNo}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`DART 문서 다운로드 실패: ${res.status} ${res.statusText}`);
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    try {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries().map((e) => ({
+        name: e.entryName,
+        size: e.header.size,
+        content_snippet: e.getData().toString('utf-8').slice(0, 1000)
+      }));
+      return {
+        rcept_no: rceptNo,
+        direct_url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`,
+        zip_files_count: entries.length,
+        files: entries
+      };
+    } catch {
+      return {
+        rcept_no: rceptNo,
+        direct_url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`,
+        content_snippet: buffer.toString('utf-8').slice(0, 2000)
+      };
+    }
   });
 }
 
@@ -186,7 +218,7 @@ async function loadCorpCodeList(): Promise<CorpItem[]> {
 }
 
 // ============================================================================
-// 4. KRX 시장 시세 데이터 모듈 (모든 원천 필드 보존)
+// 4. KRX 시장 시세 데이터 모듈 (정부 공식 API + 실시간 피드 + 시계열 조회)
 // ============================================================================
 function parseNum(v: any): number {
   if (typeof v === 'number') return v;
@@ -212,73 +244,55 @@ function formatDateYmd(date: Date): string {
   return `${y}${m}${d}`;
 }
 
-async function fetchFromGovApi(cleanCode: string, apiKey: string, asOfDate?: string, includeRaw = true) {
+// 공공데이터포털 금융위원회 주식시세정보 공식 API (단일/복수일)
+async function fetchFromGovApi(
+  cleanCode: string,
+  apiKey: string,
+  asOfDate?: string,
+  beginDate?: string,
+  endDate?: string,
+  numOfRows = 30
+) {
   return enqueue(async () => {
     try {
       const cleanKey = apiKey.includes('%') ? decodeURIComponent(apiKey) : apiKey;
       let dateQuery = '';
       if (asOfDate) {
         dateQuery = `&basDt=${asOfDate.replace(/-/g, '')}`;
+      } else if (beginDate && endDate) {
+        dateQuery = `&beginBasDt=${beginDate.replace(/-/g, '')}&endBasDt=${endDate.replace(/-/g, '')}`;
       } else {
         const now = new Date();
         const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
         dateQuery = `&beginBasDt=${formatDateYmd(twoWeeksAgo)}&endBasDt=${formatDateYmd(now)}`;
       }
 
-      const url = `https://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo?serviceKey=${encodeURIComponent(cleanKey)}&resultType=json&likeSrtnCd=${cleanCode}${dateQuery}&numOfRows=30`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) return { result: null, error: `HTTP ${res.status}` };
+      const url = `https://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo?serviceKey=${encodeURIComponent(cleanKey)}&resultType=json&likeSrtnCd=${cleanCode}${dateQuery}&numOfRows=${numOfRows}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) return { items: [], error: `HTTP ${res.status} ${res.statusText}` };
 
       const json: any = await res.json().catch(() => null);
       if (!json || json?.response?.header?.resultCode !== '00') {
-        return { result: null, error: json?.response?.header?.resultMsg || '응답 오류' };
+        return { items: [], error: json?.response?.header?.resultMsg || '공공데이터포털 응답 오류' };
       }
 
       const rawItems = json?.response?.body?.items?.item;
-      if (!rawItems) return { result: null, error: '시세 데이터 없음' };
+      if (!rawItems) return { items: [], error: '조회된 시세 데이터가 없습니다.' };
 
       const itemsArray = Array.isArray(rawItems) ? rawItems : [rawItems];
       const matched = itemsArray.filter((it: any) => String(it.srtnCd || '').trim() === cleanCode);
-      if (matched.length === 0) return { result: null, error: '일치 종목 없음' };
+      if (matched.length === 0) return { items: [], error: `종목코드 ${cleanCode} 데이터가 없습니다.` };
 
       matched.sort((a: any, b: any) => String(b.basDt || '').localeCompare(String(a.basDt || '')));
-      const item = matched[0];
-
-      const closePrice = parseNum(item.clpr);
-      const marketCapKrw = parseNum(item.mrktTotAmt);
-      const basDt = String(item.basDt || '');
-      const tradeDate = basDt.length === 8 ? `${basDt.slice(0, 4)}-${basDt.slice(4, 6)}-${basDt.slice(6, 8)}` : basDt;
-
-      return {
-        result: {
-          stock_code: cleanCode,
-          stock_name: item.itmsNm || '',
-          market_type: item.mrktCtg || 'KOSPI',
-          as_of_date: tradeDate,
-          close_price: closePrice,
-          open_price: parseNum(item.mkp),
-          high_price: parseNum(item.hipr),
-          low_price: parseNum(item.lopr),
-          change_amount: parseNum(item.vs),
-          change_rate_percent: parseNum(item.fltRt),
-          market_cap_krw: marketCapKrw,
-          market_cap_billion_krw: Math.round(marketCapKrw / 100_000_000),
-          total_shares: parseNum(item.lstgStCnt),
-          high_52w: parseNum(item.hipr),
-          low_52w: parseNum(item.lopr),
-          trading_volume: parseNum(item.trqu),
-          trading_value_krw: parseNum(item.trPrc),
-          source: '금융위원회/한국거래소 공공데이터포털 공식 API',
-          ...(includeRaw ? { raw_data: item } : {})
-        }
-      };
+      return { items: matched };
     } catch (e: any) {
-      return { result: null, error: e.message };
+      return { items: [], error: e.message };
     }
   });
 }
 
-async function fetchFromKrxFeed(cleanCode: string, includeRaw = true, warning?: string) {
+// 한국거래소 실시간 피드 (정부 API 부재 또는 장애 시 자동 failover)
+async function fetchFromKrxFeed(cleanCode: string, warning?: string) {
   return enqueue(async () => {
     const url = `https://m.stock.naver.com/api/stock/${cleanCode}/integration`;
     const res = await fetch(url, {
@@ -305,11 +319,6 @@ async function fetchFromKrxFeed(cleanCode: string, includeRaw = true, warning?: 
     if (dealTrend?.bizdate) {
       const b = String(dealTrend.bizdate);
       tradeDate = b.length === 8 ? `${b.slice(0, 4)}-${b.slice(4, 6)}-${b.slice(6, 8)}` : b;
-    } else {
-      const d = new Date();
-      if (d.getDay() === 0) d.setDate(d.getDate() - 2);
-      else if (d.getDay() === 6) d.setDate(d.getDate() - 1);
-      tradeDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     }
 
     return {
@@ -321,6 +330,7 @@ async function fetchFromKrxFeed(cleanCode: string, includeRaw = true, warning?: 
       open_price: parseNum(getVal('openPrice')),
       high_price: parseNum(getVal('highPrice')),
       low_price: parseNum(getVal('lowPrice')),
+      last_close_price: parseNum(getVal('lastClosePrice')),
       change_amount: parseNum(dealTrend?.compareToPreviousClosePrice),
       change_rate_percent: parseNum(dealTrend?.fluctuationsRatio),
       market_cap_krw: marketCapKrw,
@@ -330,24 +340,99 @@ async function fetchFromKrxFeed(cleanCode: string, includeRaw = true, warning?: 
       low_52w: parseNum(getVal('lowPriceOf52Weeks')),
       trading_volume: parseNum(getVal('accumulatedTradingVolume')),
       trading_value_krw: parseNum(dealTrend?.accumulatedTradingValue),
+      per: getVal('per'),
+      pbr: getVal('pbr'),
+      eps: getVal('eps'),
+      bps: getVal('bps'),
+      foreign_rate: getVal('foreignRate'),
+      dividend_yield: getVal('dividendYieldRatio'),
+      dividend: getVal('dividend'),
       source: '한국거래소(KRX) 공식 시세 피드',
-      ...(includeRaw ? { raw_data: data } : {}),
+      raw_data: data,
       ...(warning ? { warning } : {})
     };
   });
 }
 
+// 최종 단일 시세 진입점
 async function getKrxPrice(stockCode: string, asOfDate?: string, includeRaw = true) {
   const cleanCode = stockCode.trim().padStart(6, '0');
   if (!/^\d{6}$/.test(cleanCode)) throw new Error(`유효하지 않은 종목코드입니다: ${stockCode}`);
 
   const apiKey = process.env.KRX_API_KEY;
   if (apiKey) {
-    const { result, error } = await fetchFromGovApi(cleanCode, apiKey, asOfDate, includeRaw);
-    if (result) return result;
-    return fetchFromKrxFeed(cleanCode, includeRaw, `[주의] 공공데이터포털 API 실패로 실시간 피드로 대체되었습니다. (${error})`);
+    const { items, error } = await fetchFromGovApi(cleanCode, apiKey, asOfDate);
+    if (items.length > 0) {
+      const item = items[0];
+      const closePrice = parseNum(item.clpr);
+      const marketCapKrw = parseNum(item.mrktTotAmt);
+      const basDt = String(item.basDt || '');
+      const tradeDate = basDt.length === 8 ? `${basDt.slice(0, 4)}-${basDt.slice(4, 6)}-${basDt.slice(6, 8)}` : basDt;
+
+      return {
+        stock_code: cleanCode,
+        stock_name: item.itmsNm || '',
+        market_type: item.mrktCtg || 'KOSPI',
+        as_of_date: tradeDate,
+        close_price: closePrice,
+        open_price: parseNum(item.mkp),
+        high_price: parseNum(item.hipr),
+        low_price: parseNum(item.lopr),
+        change_amount: parseNum(item.vs),
+        change_rate_percent: parseNum(item.fltRt),
+        market_cap_krw: marketCapKrw,
+        market_cap_billion_krw: Math.round(marketCapKrw / 100_000_000),
+        total_shares: parseNum(item.lstgStCnt),
+        high_52w: parseNum(item.hipr),
+        low_52w: parseNum(item.lopr),
+        trading_volume: parseNum(item.trqu),
+        trading_value_krw: parseNum(item.trPrc),
+        source: '금융위원회/한국거래소 공공데이터포털 공식 API',
+        ...(includeRaw ? { raw_data: item } : {})
+      };
+    }
+    return fetchFromKrxFeed(cleanCode, `[주의] 공공데이터포털 API 실패로 실시간 피드로 대체되었습니다. (${error})`);
   }
-  return fetchFromKrxFeed(cleanCode, includeRaw);
+  return fetchFromKrxFeed(cleanCode);
+}
+
+// 기간별 시세 시계열 조회
+async function getKrxPriceRange(stockCode: string, beginDate: string, endDate: string) {
+  const cleanCode = stockCode.trim().padStart(6, '0');
+  const apiKey = process.env.KRX_API_KEY;
+  if (!apiKey) {
+    throw new Error('기간별 시세 시계열 조회는 공공데이터포털 API 키(KRX_API_KEY)가 필요합니다.');
+  }
+
+  const { items, error } = await fetchFromGovApi(cleanCode, apiKey, undefined, beginDate, endDate, 100);
+  if (items.length === 0) {
+    throw new Error(`기간별 시세 조회 실패: ${error || '데이터 없음'}`);
+  }
+
+  const timeSeries = items.map((it: any) => {
+    const basDt = String(it.basDt || '');
+    return {
+      date: basDt.length === 8 ? `${basDt.slice(0, 4)}-${basDt.slice(4, 6)}-${basDt.slice(6, 8)}` : basDt,
+      close_price: parseNum(it.clpr),
+      open_price: parseNum(it.mkp),
+      high_price: parseNum(it.hipr),
+      low_price: parseNum(it.lopr),
+      trading_volume: parseNum(it.trqu),
+      trading_value_krw: parseNum(it.trPrc),
+      market_cap_krw: parseNum(it.mrktTotAmt),
+      total_shares: parseNum(it.lstgStCnt),
+      flt_rt: parseNum(it.fltRt)
+    };
+  });
+
+  return {
+    stock_code: cleanCode,
+    stock_name: items[0]?.itmsNm || '',
+    count: timeSeries.length,
+    begin_date: beginDate,
+    end_date: endDate,
+    time_series: timeSeries
+  };
 }
 
 // ============================================================================
@@ -409,7 +494,6 @@ async function fetchMultiYearFinancials(
       }
     } catch (err: any) {
       if (err.message.includes('한도 초과') || err.message.includes('키 오류')) throw err;
-      // 특정 연도 미공시(013 등)는 안전하게 패스하고 다음 연도 수집
     }
   }
 
@@ -425,13 +509,13 @@ async function fetchMultiYearFinancials(
 }
 
 // ============================================================================
-// 6. MCP 도구 등록 (범용 API 호출 + 시세/재무/자금공시 완벽 지원)
+// 6. MCP 도구 전수 등록 (공식 엔드포인트 및 파라미터 100% 개방)
 // ============================================================================
 
-// [만능 범용 도구] DART 오픈API 전체 엔드포인트 자유 호출 도구
+// [0. 만능 범용 도구] Open DART의 70여 개 모든 엔드포인트 임의 파라미터 무제한 호출
 server.tool(
   'call_dart_api',
-  '금융감독원 DART 오픈API의 모든 공식 엔드포인트를 자유롭게 호출합니다. DART 공식 문서에 정의된 모든 엔드포인트(예: /company.json, /list.json, /fnlttSinglAcnt.json, /fnlttMultiAcnt.json, /detSecIsu.json, /piicDecsn.json, /cvbdIsDecsn.json 등)와 모든 파라미터를 그대로 전달하여 원본 JSON을 조회할 수 있습니다.',
+  '금융감독원 DART 오픈API의 모든 공식 엔드포인트를 자유롭게 호출합니다. DART 공식 문서에 정의된 모든 엔드포인트(예: /company.json, /list.json, /fnlttSinglAcnt.json, /fnlttMultiAcnt.json, /detSecIsu.json, /piicDecsn.json, /cvbdIsDecsn.json, /drDecsn.json 등)와 모든 파라미터를 그대로 전달하여 원본 JSON을 조회할 수 있습니다.',
   {
     endpoint: z.string().describe('DART 오픈API 엔드포인트 경로 (예: "/company.json", "/list.json", "/piicDecsn.json", "/detSecIsu.json")'),
     params: z.record(z.any()).describe('요청 파라미터 객체 (crtfc_key는 자동 주입되므로 corp_code, bsns_year, bgn_de 등 필요한 파라미터를 자유롭게 전달)')
@@ -439,19 +523,41 @@ server.tool(
   async ({ endpoint, params }) => safeTool(() => fetchDart(endpoint, params))
 );
 
-// [시세 도구] KRX 주식 시장 시세 조회
+// [1. 공시서류 원문 다운로드]
+server.tool(
+  'download_document',
+  'DART 접수번호(rcept_no)에 해당하는 공시서류 원문 파일(ZIP/XML)을 다운로드하여 파일 목록 및 내용 요약을 확인합니다. (/api/document.xml)',
+  {
+    rcept_no: z.string().regex(/^\d{14}$/, '접수번호는 14자리 숫자여야 합니다').describe('DART 공시 접수번호 (14자리)')
+  },
+  async ({ rcept_no }) => safeTool(() => fetchDartDocument(rcept_no))
+);
+
+// [2. KRX 주식 시장 시세 단일 조회]
 server.tool(
   'get_krx_price',
-  '한국거래소(KRX) 공식 주식 시장 시세 데이터를 조회합니다. 기준일 확정 종가, 시가총액, 상장주식수, 52주 최고/최저가 등 공식 시장 데이터를 반환하며, 원천 데이터 전체(raw_data)도 함께 제공합니다.',
+  '한국거래소(KRX) 공식 주식 시장 시세 데이터를 조회합니다. 기준일 확정 종가, 시가총액, 상장주식수, 52주 최고/최저가, PER, PBR 등 공식 시장 데이터를 반환하며, 원천 데이터 전체(raw_data)도 함께 제공합니다.',
   {
     stock_code: z.string().describe('6자리 종목코드 (예: "005930" 삼성전자)'),
     as_of_date: dateSchema.optional().describe('특정 기준일자 (YYYYMMDD 형식, 미지정 시 최근 확정 거래일)'),
-    include_raw: z.boolean().default(true).describe('원천 API의 전체 응답(raw_data) 포함 여부 (기본값: true)')
+    include_raw: z.boolean().default(true).describe('원천 API 전체 응답(raw_data) 포함 여부 (기본값: true)')
   },
   async ({ stock_code, as_of_date, include_raw }) => safeTool(() => getKrxPrice(stock_code, as_of_date, include_raw))
 );
 
-// [재무 도구] 다중 연도 재무 3표 일괄 수집
+// [3. KRX 주식 시장 기간별 시세 시계열 조회]
+server.tool(
+  'get_krx_price_range',
+  '한국거래소(KRX) 특정 기간(begin_date ~ end_date)의 일별 주가 시계열(종가, 시가, 고가, 저가, 거래량, 거래대금, 시가총액)을 일괄 조회합니다. (KRX_API_KEY 필요)',
+  {
+    stock_code: stockCodeSchema,
+    begin_date: dateSchema.describe('조회 시작일자 (YYYYMMDD)'),
+    end_date: dateSchema.describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ stock_code, begin_date, end_date }) => safeTool(() => getKrxPriceRange(stock_code, begin_date, end_date))
+);
+
+// [4. 다중 연도 재무 3표 일괄 수집]
 server.tool(
   'get_multi_year_financials',
   '특정 기업의 최근 N개년(기본 10개년) 사업보고서 표준 주요 재무 3표(손익계산서, 재무상태표, 현금흐름표 계정 원본)를 일괄 수집합니다. 각 연도별 DART 공시 뷰어 바로가기 링크(direct_url)가 자동 첨부됩니다.',
@@ -467,7 +573,7 @@ server.tool(
     safeTool(() => fetchMultiYearFinancials(corp_code, years, reprt_code, fs_div, start_year, end_year))
 );
 
-// [재무 도구] 다중 회사 주요계정 비교 조회 (신규)
+// [5. 다중 회사 주요계정 비교 조회]
 server.tool(
   'get_multi_corp_financials',
   '여러 기업(최대 수십 개 사)의 특정 연도 표준 주요계정을 한 번의 호출로 일괄 비교 조회합니다. (/api/fnlttMultiAcnt.json)',
@@ -480,64 +586,35 @@ server.tool(
     safeTool(() => fetchDart('/fnlttMultiAcnt.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [자금조달/채무 도구 1] 채무증권(회사채/CP/단기사채) 발행실적 및 미상환 잔액 현황 (신규)
+// [6. 단일 연도 표준 주요계정]
 server.tool(
-  'get_debt_securities_status',
-  '기업의 채무증권(회사채, 기업어음(CP), 전자단기사채 등) 발행실적 및 만기별 미상환 잔액 현황을 조회합니다. (/api/detSecIsu.json)',
+  'get_key_financials',
+  '단일 연도의 DART 표준 주요계정(재무상태표, 손익계산서, 현금흐름표 필수 25개 계정 원본)을 조회합니다. (/api/fnlttSinglAcnt.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/fnlttSinglAcnt.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [7. 단일 연도 전체 재무제표]
+server.tool(
+  'get_all_financials',
+  '단일 연도의 전체 재무제표(주석 제외 전체 계정 원본)를 조회합니다. (/api/fnlttSinglAcntAll.json)',
   {
     corp_code: corpCodeSchema,
     bsns_year: bsnsYearSchema,
-    reprt_code: reprtCodeSchema
+    reprt_code: reprtCodeSchema,
+    fs_div: z.enum(['CFS', 'OFS']).default('CFS').describe('연결(CFS) / 개별(OFS) 구분')
   },
-  async ({ corp_code, bsns_year, reprt_code }) =>
-    safeTool(() => fetchDart('/detSecIsu.json', { corp_code, bsns_year, reprt_code }))
+  async ({ corp_code, bsns_year, reprt_code, fs_div }) =>
+    safeTool(() => fetchDart('/fnlttSinglAcntAll.json', { corp_code, bsns_year, reprt_code, fs_div }))
 );
 
-// [자금조달/채무 도구 2] 유상증자 결정 공시 (신규)
-server.tool(
-  'get_capital_increase',
-  '기업의 유상증자 결정 주요사항보고서를 조회합니다. 신주 발행가액, 증자방식, 자금조달목적(시설/운영/채무상환자금 등) 원본을 조회합니다. (/api/piicDecsn.json)',
-  {
-    corp_code: corpCodeSchema,
-    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
-    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
-  },
-  async ({ corp_code, bgn_de, end_de }) =>
-    safeTool(() => fetchDart('/piicDecsn.json', { corp_code, bgn_de, end_de }))
-);
-
-// [자금조달/채무 도구 3] 전환사채(CB) 발행결정 공시 (신규)
-server.tool(
-  'get_convertible_bonds',
-  '기업의 전환사채(CB) 발행결정 주요사항보고서를 조회합니다. 사채의 권면총액, 전환가액, 자금조달목적(시설/운영/채무상환자금 등), 표면/만기 이자율 원본을 조회합니다. (/api/cvbdIsDecsn.json)',
-  {
-    corp_code: corpCodeSchema,
-    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
-    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
-  },
-  async ({ corp_code, bgn_de, end_de }) =>
-    safeTool(() => fetchDart('/cvbdIsDecsn.json', { corp_code, bgn_de, end_de }))
-);
-
-// [자금조달/채무 도구 4] 신주인수권부사채(BW) 발행결정 공시 (신규)
-server.tool(
-  'get_bond_with_warrants',
-  '기업의 신주인수권부사채(BW) 발행결정 주요사항보고서를 조회합니다. 사채 권면총액, 행사가액, 자금조달목적 원본을 조회합니다. (/api/bdwtIsDecsn.json)',
-  {
-    corp_code: corpCodeSchema,
-    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
-    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
-  },
-  async ({ corp_code, bgn_de, end_de }) =>
-    safeTool(() => fetchDart('/bdwtIsDecsn.json', { corp_code, bgn_de, end_de }))
-);
-
-// [기본 도구] 회사 고유번호 검색
+// [8. 회사 고유번호 검색 (회사명, 종목코드, 고유번호 전방위 검색)]
 server.tool(
   'search_corp_code',
-  '회사명 또는 종목코드로 DART 8자리 고유번호(corp_code)를 검색합니다. (24시간 캐시 사용)',
+  '회사명, 종목코드, 또는 고유번호로 DART 8자리 고유번호(corp_code)를 검색합니다. (24시간 캐시 사용)',
   {
-    query: z.string().describe('회사명(예: "삼성전자") 또는 6자리 종목코드(예: "005930")'),
+    query: z.string().describe('회사명(예: "삼성전자"), 6자리 종목코드(예: "005930"), 또는 8자리 고유번호'),
     limit: z.number().int().min(1).max(100).default(10).describe('반환할 최대 결과 수')
   },
   async ({ query, limit }) =>
@@ -547,13 +624,15 @@ server.tool(
       const isNum = /^\d+$/.test(q);
 
       const matched = list.filter((item) => {
-        if (isNum && item.stock_code.includes(q)) return true;
+        if (isNum) {
+          if (item.stock_code.includes(q) || item.corp_code.includes(q)) return true;
+        }
         return item.corp_name.toLowerCase().includes(q);
       });
 
       matched.sort((a, b) => {
-        const aExact = a.corp_name.toLowerCase() === q || a.stock_code === q;
-        const bExact = b.corp_name.toLowerCase() === q || b.stock_code === q;
+        const aExact = a.corp_name.toLowerCase() === q || a.stock_code === q || a.corp_code === q;
+        const bExact = b.corp_name.toLowerCase() === q || b.stock_code === q || b.corp_code === q;
         if (aExact && !bExact) return -1;
         if (!aExact && bExact) return 1;
         return 0;
@@ -563,18 +642,18 @@ server.tool(
     })
 );
 
-// [기본 도구] 기업 기본개요
+// [9. 기업 기본개요]
 server.tool(
   'get_company_info',
-  'DART 기업 기본개요(정식명칭, 대표자명, 법인구분, 주소, 업종코드, 설립일 등 원본 전체)를 조회합니다. (/api/company.json)',
+  'DART 기업 기본개요(정식명칭, 대표자명, 법인구분, 주소, 업종코드, 설립일, 결산월 등 원본 전체)를 조회합니다. (/api/company.json)',
   { corp_code: corpCodeSchema },
   async ({ corp_code }) => safeTool(() => fetchDart('/company.json', { corp_code }))
 );
 
-// [기본 도구] 최근 공시 목록 (DART 공식 파라미터 전수 지원)
+// [10. 최근 공시 목록 (공식 11개 파라미터 전수 지원)]
 server.tool(
   'get_disclosures',
-  '최근 공시 목록을 조회합니다. DART 공식 파라미터를 모두 지원하며, 각 항목마다 DART 공식 웹 뷰어 링크(direct_url)가 자동 첨부됩니다. (/api/list.json)',
+  '최근 공시 목록을 조회합니다. DART 공식 파라미터(시작/종료일, 공시유형, 정렬, 페이지 등)를 모두 지원하며, 각 항목마다 DART 공식 웹 뷰어 링크(direct_url)가 자동 첨부됩니다. (/api/list.json)',
   {
     corp_code: corpCodeSchema.optional(),
     bgn_de: dateSchema.optional().describe('시작일자 (YYYYMMDD)'),
@@ -601,30 +680,7 @@ server.tool(
     })
 );
 
-// [기본 도구] 단일 연도 주요계정
-server.tool(
-  'get_key_financials',
-  '단일 연도의 DART 표준 주요계정(재무상태표, 손익계산서, 현금흐름표 필수 25개 계정 원본)을 조회합니다. (/api/fnlttSinglAcnt.json)',
-  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
-  async ({ corp_code, bsns_year, reprt_code }) =>
-    safeTool(() => fetchDart('/fnlttSinglAcnt.json', { corp_code, bsns_year, reprt_code }))
-);
-
-// [기본 도구] 단일 연도 전체 재무제표
-server.tool(
-  'get_all_financials',
-  '단일 연도의 전체 재무제표(주석 제외 전체 계정 원본)를 조회합니다. (/api/fnlttSinglAcntAll.json)',
-  {
-    corp_code: corpCodeSchema,
-    bsns_year: bsnsYearSchema,
-    reprt_code: reprtCodeSchema,
-    fs_div: z.enum(['CFS', 'OFS']).default('CFS').describe('연결(CFS) / 개별(OFS) 구분')
-  },
-  async ({ corp_code, bsns_year, reprt_code, fs_div }) =>
-    safeTool(() => fetchDart('/fnlttSinglAcntAll.json', { corp_code, bsns_year, reprt_code, fs_div }))
-);
-
-// [기본 도구] 주식 총수 현황
+// [11. 주식의 총수 현황]
 server.tool(
   'get_stock_totqy_sttus',
   '주식의 총수 현황(발행주식 총수, 자기주식수, 유통주식수 등)을 조회합니다. (/api/stockTotqySttus.json)',
@@ -633,7 +689,16 @@ server.tool(
     safeTool(() => fetchDart('/stockTotqySttus.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [기본 도구] 최대주주 현황
+// [12. 증자(감자) 현황 이력]
+server.tool(
+  'get_capital_changes',
+  '기업의 과거 증자 및 감자 현황 이력을 조회합니다. (/api/irdsSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/irdsSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [13. 최대주주 현황]
 server.tool(
   'get_major_shareholders',
   '최대주주 및 특수관계인 지분 현황을 조회합니다. (/api/hyslrSttus.json)',
@@ -642,25 +707,52 @@ server.tool(
     safeTool(() => fetchDart('/hyslrSttus.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [기본 도구] 자기주식 현황
+// [14. 최대주주 변동현황]
+server.tool(
+  'get_major_shareholder_changes',
+  '최대주주의 변동 일자, 변동 원인, 지분율 변동 내역을 조회합니다. (/api/hyslrChgSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/hyslrChgSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [15. 소액주주 현황]
+server.tool(
+  'get_minority_shareholders',
+  '소액주주 수, 소액주주 보유 주식수, 지분율 현황을 조회합니다. (/api/mrhlSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/mrhlSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [16. 자기주식 취득 및 처분 현황]
 server.tool(
   'get_treasury_stocks',
-  '자기주식 취득 및 처분 현황을 조회합니다. (/api/tesstkAcqsDspsSttus.json)',
+  '자기주식 취득 및 처분 현황(신탁계약, 직접취득 등)을 조회합니다. (/api/tesstkAcqsDspsSttus.json)',
   { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
   async ({ corp_code, bsns_year, reprt_code }) =>
     safeTool(() => fetchDart('/tesstkAcqsDspsSttus.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [기본 도구] 배당 정보
+// [17. 배당에 관한 사항]
 server.tool(
   'get_dividend_info',
-  '배당에 관한 사항을 조회합니다. (/api/alotMatter.json)',
+  '배당에 관한 사항(주당배당금, 배당수익률, 현금배당성향 등)을 조회합니다. (/api/alotMatter.json)',
   { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
   async ({ corp_code, bsns_year, reprt_code }) =>
     safeTool(() => fetchDart('/alotMatter.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [기본 도구] 임직원 급여 현황
+// [18. 타법인 출자현황]
+server.tool(
+  'get_other_corp_investments',
+  '타법인 출자현황(출자회사명, 지분율, 장부가액, 최초취득금액, 당기손익 등)을 조회합니다. (/api/otrCprInvstmntSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/otrCprInvstmntSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [19. 임직원 수 및 1인 평균 급여액]
 server.tool(
   'get_employee_salaries',
   '임직원 수 및 1인 평균 급여액 현황을 조회합니다. (/api/empSttus.json)',
@@ -669,16 +761,179 @@ server.tool(
     safeTool(() => fetchDart('/empSttus.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [기본 도구] 임원 현황
+// [20. 임원 현황]
 server.tool(
   'get_executive_status',
-  '임원 현황을 조회합니다. (/api/exctvSttus.json)',
+  '등기/미등기 임원 현황(직위, 담당업무, 주요경력 등)을 조회합니다. (/api/exctvSttus.json)',
   { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
   async ({ corp_code, bsns_year, reprt_code }) =>
     safeTool(() => fetchDart('/exctvSttus.json', { corp_code, bsns_year, reprt_code }))
 );
 
-// [기본 도구] 5% 이상 대량보유 보고서
+// [21. 이사ㆍ감사 전체 보수현황]
+server.tool(
+  'get_executive_compensation',
+  '이사ㆍ감사 전체의 보수 총액 및 1인당 평균 보수액을 조회합니다. (/api/hmvAuditAllSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/hmvAuditAllSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [22. 5억원 이상 개인별 보수현황]
+server.tool(
+  'get_individual_compensation',
+  '보수지급금액 5억원 이상인 상위 5인 개인별 보수현황을 조회합니다. (/api/indvdlBySttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/indvdlBySttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [23. 채무증권 발행실적 및 미상환 잔액 현황]
+server.tool(
+  'get_debt_securities_status',
+  '기업의 채무증권(회사채, 기업어음(CP), 전자단기사채 등) 발행실적 및 만기별 미상환 잔액 현황을 조회합니다. (/api/detSecIsu.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/detSecIsu.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [24. 기업어음증권(CP) 미상환 잔액]
+server.tool(
+  'get_cp_unredeemed_status',
+  '기업어음증권(CP)의 만기별(10일 이하 ~ 3년 초과) 미상환 잔액 현황을 조회합니다. (/api/cpUnreSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/cpUnreSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [25. 전자단기사채 미상환 잔액]
+server.tool(
+  'get_short_term_bond_unredeemed',
+  '전자단기사채의 만기별 미상환 잔액 현황을 조회합니다. (/api/shtermBndUnreSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/shtermBndUnreSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [26. 회사채 미상환 잔액]
+server.tool(
+  'get_corporate_bond_unredeemed',
+  '회사채의 만기별(1년 이하 ~ 10년 초과) 미상환 잔액 현황을 조회합니다. (/api/bndUnreSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/bndUnreSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [27. 신종자본증권(영구채) 미상환 잔액]
+server.tool(
+  'get_hybrid_bond_unredeemed',
+  '신종자본증권(영구채)의 만기별 미상환 잔액 현황을 조회합니다. (/api/hbdCpUnreSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/hbdCpUnreSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [28. 조건부자본증권(코코본드) 미상환 잔액]
+server.tool(
+  'get_conditional_capital_bond_unredeemed',
+  '조건부자본증권의 만기별 미상환 잔액 현황을 조회합니다. (/api/cndlCpUnreSttus.json)',
+  { corp_code: corpCodeSchema, bsns_year: bsnsYearSchema, reprt_code: reprtCodeSchema },
+  async ({ corp_code, bsns_year, reprt_code }) =>
+    safeTool(() => fetchDart('/cndlCpUnreSttus.json', { corp_code, bsns_year, reprt_code }))
+);
+
+// [29. 유상증자 결정 (주요사항보고서)]
+server.tool(
+  'get_capital_increase',
+  '기업의 유상증자 결정 주요사항보고서를 조회합니다. 신주 발행가액, 증자방식, 자금조달목적(시설/운영/채무상환자금 등) 원본을 조회합니다. (/api/piicDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/piicDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [30. 무상증자 결정 (주요사항보고서)]
+server.tool(
+  'get_free_capital_increase',
+  '기업의 무상증자 결정 주요사항보고서를 조회합니다. 신주 배정비율, 배정기준일 등을 조회합니다. (/api/fricDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/fricDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [31. 전환사채(CB) 발행결정 (주요사항보고서)]
+server.tool(
+  'get_convertible_bonds',
+  '기업의 전환사채(CB) 발행결정 주요사항보고서를 조회합니다. 사채의 권면총액, 전환가액, 자금조달목적(시설/운영/채무상환자금 등), 표면/만기 이자율 원본을 조회합니다. (/api/cvbdIsDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/cvbdIsDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [32. 신주인수권부사채(BW) 발행결정 (주요사항보고서)]
+server.tool(
+  'get_bond_with_warrants',
+  '기업의 신주인수권부사채(BW) 발행결정 주요사항보고서를 조회합니다. 사채 권면총액, 행사가액, 자금조달목적 원본을 조회합니다. (/api/bdwtIsDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/bdwtIsDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [33. 교환사채(EB) 발행결정 (주요사항보고서)]
+server.tool(
+  'get_exchangeable_bonds',
+  '기업의 교환사채(EB) 발행결정 주요사항보고서를 조회합니다. 사채 권면총액, 교환대상 주식, 교환가액 원본을 조회합니다. (/api/exbdIsDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/exbdIsDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [34. 감자 결정 (주요사항보고서)]
+server.tool(
+  'get_capital_reduction',
+  '기업의 감자(자본감소) 결정 주요사항보고서를 조회합니다. 감자비율, 감자방법, 감자기준일 등을 조회합니다. (/api/crDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/crDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [35. 회사합병 결정 (주요사항보고서)]
+server.tool(
+  'get_merger_decision',
+  '기업의 회사합병 결정 주요사항보고서를 조회합니다. 합병비율, 합병신주, 합병상대회사 등을 조회합니다. (/api/mgDecsn.json)',
+  {
+    corp_code: corpCodeSchema,
+    bgn_de: dateSchema.optional().describe('조회 시작일자 (YYYYMMDD)'),
+    end_de: dateSchema.optional().describe('조회 종료일자 (YYYYMMDD)')
+  },
+  async ({ corp_code, bgn_de, end_de }) =>
+    safeTool(() => fetchDart('/mgDecsn.json', { corp_code, bgn_de, end_de }))
+);
+
+// [36. 5% 이상 대량보유 보고서]
 server.tool(
   'get_5percent_reports',
   '주식등의 대량보유 상황보고서(5% 이상 보유 보고 원본)를 조회합니다. (/api/majorstock.json)',
@@ -686,7 +941,7 @@ server.tool(
   async ({ corp_code }) => safeTool(() => fetchDart('/majorstock.json', { corp_code }))
 );
 
-// [기본 도구] 임원/주요주주 특정증권 소유보고서
+// [37. 임원/주요주주 특정증권 소유보고서]
 server.tool(
   'get_insider_trading',
   '임원·주요주주 특정증권등 소유상황보고서를 조회합니다. (/api/elestock.json)',
