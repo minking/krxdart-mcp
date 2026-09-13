@@ -1,7 +1,7 @@
 {
   "name": "krxdart-mcp",
   "version": "1.0.0",
-  "description": "Integrated DART Disclosures & KRX Market Data MCP Server for PH-CVS 3.0 ONE",
+  "description": "Integrated DART Disclosures & KRX Market Data MCP Server",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -28,7 +28,6 @@
     "krx",
     "opendart",
     "financial-statement",
-    "ph-cvs",
     "stock"
   ],
   "author": "minki",

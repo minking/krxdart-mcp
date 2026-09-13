@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /**
  * krxdart-mcp: Integrated DART Disclosures & KRX Market Data MCP Server
- * Optimized for PH-CVS 3.0 ONE (S-A Lawful Disclosures + S-C Stock Market Data)
  * Single-file, zero heavy dependencies, Node >= 20.0.0
  */
 import fs from 'node:fs';
@@ -268,8 +267,7 @@ async function fetchFromGovApi(cleanCode: string, apiKey: string, asOfDate?: str
           low_52w: parseNum(item.lopr),
           trading_volume: parseNum(item.trqu),
           trading_value_krw: parseNum(item.trPrc),
-          source: '금융위원회/한국거래소 공공데이터포털 공식 API',
-          source_grade: 'S-C (정부·거래소 공식 법정 시장 데이터)'
+          source: '금융위원회/한국거래소 공공데이터포털 공식 API'
         }
       };
     } catch (e: any) {
@@ -331,7 +329,6 @@ async function fetchFromKrxFeed(cleanCode: string, warning?: string) {
       trading_volume: parseNum(getVal('accumulatedTradingVolume')),
       trading_value_krw: parseNum(dealTrend?.accumulatedTradingValue),
       source: '한국거래소(KRX) 공식 시세 피드',
-      source_grade: 'S-C (거래소 공식 시장 데이터)',
       ...(warning ? { warning } : {})
     };
   });
@@ -351,7 +348,7 @@ async function getKrxPrice(stockCode: string, asOfDate?: string) {
 }
 
 // ============================================================================
-// 5. PH-CVS 3.0 ONE 전용: 10개년 재무 3표 일괄 수집기 (S-A 법정공시 원본)
+// 5. 다중 연도 재무 3표 일괄 수집기 (DART 법정공시 원천 데이터)
 // ============================================================================
 async function fetchMultiYearFinancials(
   corp_code: string,
@@ -385,26 +382,19 @@ async function fetchMultiYearFinancials(
         const rceptNo = sample.rcept_no || '';
         const directUrl = rceptNo ? `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}` : '';
 
-        const accounts = filtered.map((it: any) => ({
-          account_nm: it.account_nm,
-          account_id: it.account_id,
-          thstrm_amount: it.thstrm_amount,
-          ord: it.ord
-        }));
-
         resultsByYear[String(year)] = {
           bsns_year: String(year),
           rcept_no: rceptNo,
           direct_url: directUrl,
           fs_div: sample.fs_div,
-          accounts_count: accounts.length,
-          accounts
+          accounts_count: filtered.length,
+          accounts: filtered
         };
         validCount++;
       }
     } catch (err: any) {
       if (err.message.includes('한도 초과') || err.message.includes('키 오류')) throw err;
-      // 특정 연도 미공시(013 등)는 안전하게 패스하고 다음 연도 수집
+      // 특정 연도 미공시(013 등)는 안전하게 건너뛰고 다음 연도 수집
     }
   }
 
@@ -415,19 +405,19 @@ async function fetchMultiYearFinancials(
     fs_div_requested: fs_div,
     years_requested: years,
     years_retrieved: validCount,
-    source_grade: 'S-A (금융감독원 전자공시 감사보고서/사업보고서 법정공시 원문)',
+    source: '금융감독원 전자공시시스템(DART)',
     financial_time_series: resultsByYear
   };
 }
 
 // ============================================================================
-// 6. MCP 도구 등록 (총 15종: PH-CVS 3.0 핵심 도구 + DART 원천 도구)
+// 6. MCP 도구 등록 (총 15종: 시세/다중재무 도구 + DART 원천 도구)
 // ============================================================================
 
-// [신규 도구 1] KRX 시세 조회
+// [시세 도구] KRX 시세 조회
 server.tool(
   'get_krx_price',
-  '한국거래소(KRX) 공식 시장 시세 데이터를 조회합니다. 기준일 종가, 시가총액, 상장주식수, 52주 최고/최저가 등 PH-CVS 3.0 기준 S-C 등급 공인 시장 데이터를 반환합니다.',
+  '한국거래소(KRX) 공식 주식 시장 시세 데이터를 조회합니다. 기준일 확정 종가, 시가총액, 상장주식수, 52주 최고/최저가 등 공식 시장 데이터를 반환합니다.',
   {
     stock_code: z.string().describe('6자리 종목코드 (예: "005930" 삼성전자)'),
     as_of_date: dateSchema.optional().describe('특정 기준일자 (YYYYMMDD 형식, 미지정 시 최근 확정 거래일)')
@@ -435,10 +425,10 @@ server.tool(
   async ({ stock_code, as_of_date }) => safeTool(() => getKrxPrice(stock_code, as_of_date))
 );
 
-// [신규 도구 2] 10개년 재무 3표 일괄 수집
+// [재무 도구] 다중 연도 재무 3표 일괄 수집
 server.tool(
   'get_multi_year_financials',
-  'PH-CVS 3.0 ONE 전용: 특정 기업의 최근 N개년(기본 10개년) 사업보고서 표준 주요 재무 3표(손익, 대차, 현금흐름 25개 계정)를 1회 호출로 일괄 수집합니다. 각 연도별 DART 공시 뷰어 바로가기 링크(S-A 등급 direct_url)가 자동 첨부됩니다.',
+  '특정 기업의 최근 N개년(기본 10개년) 사업보고서 표준 주요 재무 3표(손익계산서, 재무상태표, 현금흐름표 필수 계정)를 일괄 수집합니다. 각 연도별 DART 공시 뷰어 바로가기 링크(direct_url)가 자동 첨부됩니다.',
   {
     corp_code: corpCodeSchema,
     years: z.number().int().min(1).max(12).default(10).describe('수집할 최근 연도 수 (기본값: 10개년)'),
