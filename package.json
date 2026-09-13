@@ -1,0 +1,46 @@
+{
+  "name": "krxdart-mcp",
+  "version": "1.0.0",
+  "description": "Integrated DART Disclosures & KRX Market Data MCP Server for PH-CVS 3.0 ONE",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "krxdart-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/minking/krxdart-mcp.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "dart",
+    "krx",
+    "opendart",
+    "financial-statement",
+    "ph-cvs",
+    "stock"
+  ],
+  "author": "minki",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "adm-zip": "^0.5.16",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}
