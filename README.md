@@ -38,33 +38,16 @@
 
 ---
 
-## ⚙️ Claude Desktop 연동 설정
+## ⚙️ MCP 연동 설정
 
-Claude Desktop 설정 파일(`claude_desktop_config.json`)의 `mcpServers` 블록에 아래와 같이 추가합니다.
+MCP 클라이언트 설정 파일의 `mcpServers` 블록에 아래와 같이 등록합니다.
 
-### 방법 1. GitHub 원격 무설치 실행 (권장)
 ```json
 {
   "mcpServers": {
     "krxdart-mcp": {
       "command": "npx",
       "args": ["-y", "github:minking/krxdart-mcp"],
-      "env": {
-        "DART_API_KEY": "발급받은_DART_API_KEY",
-        "KRX_API_KEY": "발급받은_공공데이터포털_API_KEY"
-      }
-    }
-  }
-}
-```
-
-### 방법 2. 로컬 소스 빌드 실행
-```json
-{
-  "mcpServers": {
-    "krxdart-mcp": {
-      "command": "node",
-      "args": ["/home/minki/workspace/krxdart-mcp/dist/index.js"],
       "env": {
         "DART_API_KEY": "발급받은_DART_API_KEY",
         "KRX_API_KEY": "발급받은_공공데이터포털_API_KEY"
