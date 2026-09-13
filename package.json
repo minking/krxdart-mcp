@@ -1,7 +1,7 @@
 {
   "name": "krxdart-mcp",
-  "version": "2.1.0",
-  "description": "Pure DART Disclosures & KRX Market Data MCP Server",
+  "version": "1.0.0",
+  "description": "KRX & Open DART MCP Server",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -28,10 +28,8 @@
     "dart",
     "krx",
     "opendart",
-    "financial-statement",
     "stock"
   ],
-  "author": "minki",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
