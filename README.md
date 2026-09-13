@@ -28,13 +28,13 @@
 | :--- | :--- | :--- |
 | **`call_dart_api`** | `endpoint`, `params` | **금융감독원 Open DART의 모든 공식 엔드포인트(/api/*)를 호출하여 원본 JSON을 그대로 반환**<br/>(예: `/company.json`, `/fnlttSinglAcnt.json`, `/list.json`, `/detSecIsu.json`, `/piicDecsn.json` 등 70여 개 공식 API 전체 지원) |
 | **`call_krx_api`** | `endpoint`, `params` | **한국거래소(KRX)/금융위 공공데이터포털 주식시세정보 공식 API 원본 JSON 반환**<br/>(`getStockPriceInfo`: 일별 시세/시계열, `getItemInfo`: 종목정보 등) |
-| **`download_dart_document`** | `rcept_no` | **DART 공시 접수번호(14자리)의 법정 공시서류 원문 파일(ZIP/XML)을 내려받아 본문 전체 반환** |
+| **`download_dart_document`** | `rcept_no` | **DART 공시 접수번호(14자리)의 법정 공시서류(ZIP)를 내려받아 파일 목록과 디코딩된 텍스트 본문 반환**<br/>(※ 대용량 문서 시 응답 크기가 클 수 있음) |
 
 ### 2. 브릿지 유틸리티 (Utility)
 
 | 도구명 | 파라미터 | 설명 |
 | :--- | :--- | :--- |
-| **`search_corp_code`** | `query`, `limit` | **회사명, 6자리 종목코드("005930"), 또는 8자리 고유번호로 기업을 검색**하여 DART 고유번호 ↔ 거래소 종목코드 간 O(1) 초고속 매핑 제공 |
+| **`search_corp_code`** | `query`, `limit` | **회사명, 6자리 종목코드("005930"), 또는 8자리 고유번호로 기업 검색**<br/>(종목코드/고유번호는 O(1) 인덱스 매핑, 회사명은 부분 일치 검색) |
 
 ---
 

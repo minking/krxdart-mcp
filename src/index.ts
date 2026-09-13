@@ -21,7 +21,7 @@ const server = new McpServer({
 // 1. 레이트 리미터 & 안전 실행 래퍼 (Rate Limiter & Safe Tool Wrapper)
 // ============================================================================
 function createRateLimiter(intervalMs: number) {
-  let chain: Promise<any> = Promise.resolve();
+  let chain: Promise<void> = Promise.resolve();
   let lastRequestAt = 0;
 
   return <T>(task: () => Promise<T>): Promise<T> => {
@@ -34,7 +34,7 @@ function createRateLimiter(intervalMs: number) {
         lastRequestAt = Date.now();
       }
     });
-    chain = next.catch(() => {});
+    chain = next.then(() => {}, () => {});
     return next;
   };
 }
@@ -100,7 +100,7 @@ async function fetchDart(endpoint: string, params: Record<string, unknown> = {})
     try {
       json = JSON.parse(text);
     } catch {
-      return { status: '999', message: text.slice(0, 500) };
+      throw new Error(`DART 응답이 올바른 JSON 형식이 아닙니다: ${text.slice(0, 300)}`);
     }
 
     if (json?.status && json.status !== '000') {
@@ -172,6 +172,7 @@ async function fetchKrx(endpoint: string, params: Record<string, unknown> = {}):
         searchParams.set(k, String(v));
       }
     }
+    searchParams.set('resultType', 'json'); // JSON 파싱 보장을 위해 고정
 
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
     const url = `${KRX_BASE_URL}/${cleanEndpoint}?${searchParams.toString()}`;
@@ -303,7 +304,7 @@ server.tool(
   '금융감독원 Open DART의 모든 공식 엔드포인트를 호출하여 원본 JSON을 그대로 반환합니다. DART 공식 문서(opendart.fss.or.kr)에 정의된 모든 엔드포인트(예: "/company.json", "/fnlttSinglAcnt.json", "/fnlttMultiAcnt.json", "/list.json", "/detSecIsu.json", "/piicDecsn.json" 등)와 파라미터를 그대로 사용할 수 있습니다. (DART_API_KEY는 서버에서 자동 주입)',
   {
     endpoint: z.string().regex(/^\/[a-zA-Z0-9_-]+\.json$/, '올바른 DART JSON 엔드포인트 경로여야 합니다 (예: "/company.json", "/list.json", "/fnlttSinglAcnt.json")'),
-    params: z.record(z.any()).optional().default({}).describe('DART 요청 파라미터 객체 (예: corp_code, bsns_year, reprt_code, bgn_de 등)')
+    params: z.record(z.unknown()).optional().default({}).describe('DART 요청 파라미터 객체 (예: corp_code, bsns_year, reprt_code, bgn_de 등)')
   },
   async ({ endpoint, params }) => safeTool(() => fetchDart(endpoint, params))
 );
@@ -314,7 +315,7 @@ server.tool(
   '한국거래소(KRX)/금융위원회 공공데이터포털(apis.data.go.kr) 주식시세정보 공식 API를 호출하여 원본 JSON을 그대로 반환합니다. 단일 종목 시세, 시계열, 시장 전체 시세 등을 조회할 수 있습니다. (KRX_API_KEY는 서버에서 자동 주입)',
   {
     endpoint: z.enum(['getStockPriceInfo', 'getItemInfo']).default('getStockPriceInfo').describe('공공데이터포털 GetStockSecuritiesInfoService 엔드포인트 (기본: getStockPriceInfo)'),
-    params: z.record(z.any()).describe('요청 파라미터 객체 (예: likeSrtnCd: "005930", basDt: "20240315", beginBasDt: "20240101", endBasDt: "20240315", numOfRows: 30 등)')
+    params: z.record(z.unknown()).optional().default({}).describe('요청 파라미터 객체 (예: likeSrtnCd: "005930", basDt: "20240315", beginBasDt: "20240101", endBasDt: "20240315", numOfRows: 30 등)')
   },
   async ({ endpoint, params }) => safeTool(() => fetchKrx(endpoint, params))
 );
@@ -322,7 +323,7 @@ server.tool(
 // [3. DART 공시서류 원문 다운로드]
 server.tool(
   'download_dart_document',
-  'DART 공시 접수번호(rcept_no 14자리)의 법정 공시서류 원문 파일(ZIP/XML)을 내려받아 원문 파일 목록 및 디코딩된 본문 전체를 반환합니다. (/api/document.xml)',
+  'DART 공시 접수번호(rcept_no 14자리)의 법정 공시서류(ZIP)를 내려받아 내부 파일 목록과 디코딩된 텍스트 본문을 반환합니다. (/api/document.xml) ※ 대용량 공시문서의 경우 응답 크기가 클 수 있습니다.',
   {
     rcept_no: z.string().regex(/^\d{14}$/, 'DART 접수번호는 14자리 숫자여야 합니다')
   },
@@ -332,9 +333,9 @@ server.tool(
 // [4. 회사 고유번호 / 종목코드 O(1) 검색 유틸리티]
 server.tool(
   'search_corp_code',
-  '회사명, 6자리 종목코드, 또는 8자리 고유번호로 기업을 검색합니다. DART 고유번호(corp_code)와 거래소 종목코드(stock_code) 간의 브릿지 매핑을 O(1) 초고속으로 제공합니다.',
+  '회사명, 6자리 종목코드, 또는 8자리 고유번호로 기업을 검색합니다. 6자리 종목코드 및 8자리 고유번호 검색은 O(1) 인덱스를 사용하며, 회사명 검색은 부분 일치를 지원합니다.',
   {
-    query: z.string().describe('회사명(예: "삼성전자"), 6자리 종목코드(예: "005930"), 또는 8자리 고유번호'),
+    query: z.string().trim().min(1, '검색어를 입력해주세요').describe('회사명(예: "삼성전자"), 6자리 종목코드(예: "005930"), 또는 8자리 고유번호'),
     limit: z.number().int().min(1).max(50).default(10).describe('반환할 최대 결과 수 (기본: 10)')
   },
   async ({ query, limit }) =>
