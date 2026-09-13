@@ -200,8 +200,18 @@ export async function fetchDartDocument(rceptNo: string, maxChars: number = 8000
       throw new Error(`[DART 문서 오류 ${status ?? 'ERROR'}] ${desc}`);
     }
 
+    const TEXT_EXTS = new Set(['.xml', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv']);
     const zip = new AdmZip(buffer);
     const files = zip.getEntries().map((entry) => {
+      const ext = path.extname(entry.entryName).toLowerCase();
+      if (!TEXT_EXTS.has(ext)) {
+        return {
+          name: entry.entryName,
+          size: entry.header.size,
+          content: `[첨부 바이너리 파일: ${entry.entryName} (${(entry.header.size / 1024).toFixed(1)} KB) - 텍스트 추출 대상 아님]`
+        };
+      }
+
       let content = decodeBuffer(entry.getData());
       const originalLength = content.length;
       if (maxChars > 0 && content.length > maxChars) {
@@ -404,7 +414,7 @@ server.tool(
 // [도구 3: DART 공시 원문 ZIP 문서 다운로드 (글자수 가드 포함)]
 server.tool(
   'download_dart_document',
-  'DART 공시 접수번호(14자리)의 공시서류(ZIP)를 다운로드하여 텍스트 파일 목록과 본문을 반환합니다.',
+  'DART 공시 접수번호(14자리)의 공시서류(ZIP)를 다운로드하여 텍스트 본문과 웹 링크를 반환합니다. (반환된 direct_url은 원문 열람 공식 링크입니다)',
   {
     rcept_no: z.string().regex(/^\d{14}$/, '14자리 숫자 접수번호여야 합니다 (예: 20240312000784).'),
     max_chars: z.number().int().min(0).default(8000).describe('반환할 파일당 최대 글자 수 (기본값: 8000). 0으로 지정 시 제한 없이 전체 본문 반환.')
@@ -415,7 +425,7 @@ server.tool(
 // [도구 4: 회사명 / 종목코드 / 고유번호 검색]
 server.tool(
   'search_corp_code',
-  '회사명, 6자리 종목코드, 또는 8자리 고유번호로 기업을 검색합니다. (O(1) 인덱스 매핑)',
+  '회사명, 6자리 종목코드, 또는 8자리 고유번호로 기업을 검색합니다. (사명 변경 영향을 피하려면 6자리 종목코드[예: 005930] 검색 권장)',
   {
     query: z.string().trim().min(1, '검색어를 입력해주세요.').describe('회사명(예: 삼성전자), 6자리 종목코드(005930), 또는 8자리 고유번호'),
     limit: z.number().int().min(1).max(50).default(10).describe('반환할 최대 결과 수')
