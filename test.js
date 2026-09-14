@@ -66,21 +66,27 @@ function testEncodingDecode() {
   console.log('✅ 5. UTF-8 및 EUC-KR 인코딩 자동 복원 검증 통과');
 }
 
-// 6. 공시 원문 글자수 가드(max_chars) 로직 검증
+// 6. 공시 원문 글자수 가드(max_chars: 0 무제한 및 양수 제한) 로직 검증
 function testMaxCharsGuard() {
   const sampleLongText = '가'.repeat(10000);
-  const maxChars = 8000;
 
-  let content = sampleLongText;
-  const originalLength = content.length;
-  if (maxChars > 0 && content.length > maxChars) {
-    content = content.slice(0, maxChars) +
-      `\n\n...[글자 수 제한으로 인해 생략됨 (총 ${originalLength.toLocaleString()}자 중 ${maxChars.toLocaleString()}자 반환)]...`;
-  }
+  // 6-1. 기본값 0 (제한 없음): 전체 본문 원본 100% 유지
+  const applyLimit = (text, limit) => {
+    if (limit > 0 && text.length > limit) {
+      return text.slice(0, limit) +
+        `\n\n...[글자 수 제한으로 인해 생략됨 (총 ${text.length.toLocaleString()}자 중 ${limit.toLocaleString()}자 반환)]...`;
+    }
+    return text;
+  };
 
-  assert.ok(content.startsWith('가'.repeat(8000)), '지정된 글자 수만큼 본문 유지');
-  assert.ok(content.includes('글자 수 제한으로 인해 생략됨'), '생략 안내 태그 포함');
-  console.log('✅ 6. 공시 원문 max_chars 안전장치 검증 통과');
+  const unlimited = applyLimit(sampleLongText, 0);
+  assert.strictEqual(unlimited.length, 10000, 'max_chars=0일 때 전체 본문 100% 유지');
+
+  // 6-2. 양수 제한: 지정 글자수로 자르고 생략 태그 부착
+  const limited = applyLimit(sampleLongText, 5000);
+  assert.ok(limited.startsWith('가'.repeat(5000)), '지정된 5000자만큼 유지');
+  assert.ok(limited.includes('글자 수 제한으로 인해 생략됨'), '생략 안내 태그 포함');
+  console.log('✅ 6. 공시 원문 max_chars 안전장치 (무제한/제한) 검증 통과');
 }
 
 async function run() {

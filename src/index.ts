@@ -2,7 +2,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import crypto from 'node:crypto';
 import AdmZip from 'adm-zip';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -64,16 +63,8 @@ function getKrxApiKey(): string {
 export async function fetchKrx(apiId: string, params: Record<string, unknown> = {}): Promise<unknown> {
   return krxQueue(async () => {
     const apiKey = getKrxApiKey();
-    let cleanId = apiId.trim();
-    let category = KRX_CATEGORY_MAP[cleanId];
-
-    if (!category && cleanId.includes('/')) {
-      const parts = cleanId.split('/').filter(Boolean);
-      if (parts.length === 2) {
-        category = parts[0];
-        cleanId = parts[1];
-      }
-    }
+    const cleanId = apiId.trim();
+    const category = KRX_CATEGORY_MAP[cleanId];
 
     if (!category) {
       throw new Error(`[KRX 오류] 지원하지 않는 API ID입니다: "${apiId}". 31개 공식 ID 중 하나를 지정해주세요.`);
@@ -213,10 +204,10 @@ export async function fetchDartDocument(rceptNo: string, maxChars: number = 0): 
       }
 
       let content = decodeBuffer(entry.getData());
-      const originalLength = content.length;
       if (maxChars > 0 && content.length > maxChars) {
+        const total = content.length;
         content = content.slice(0, maxChars) +
-          `\n\n...[글자 수 제한으로 인해 생략됨 (총 ${originalLength.toLocaleString()}자 중 ${maxChars.toLocaleString()}자 반환)]...`;
+          `\n\n...[글자 수 제한으로 인해 생략됨 (총 ${total.toLocaleString()}자 중 ${maxChars.toLocaleString()}자 반환)]...`;
       }
       return {
         name: entry.entryName,
@@ -308,7 +299,7 @@ async function loadCorpList(): Promise<CorpItem[]> {
     }
 
     // 원자적 파일 쓰기 (tmp -> rename)
-    const tmp = `${CACHE_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    const tmp = `${CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
     try {
       fs.writeFileSync(tmp, JSON.stringify(items), 'utf-8');
       fs.renameSync(tmp, CACHE_FILE);
