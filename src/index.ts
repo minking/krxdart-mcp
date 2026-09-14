@@ -183,7 +183,7 @@ export async function fetchDart(endpoint: string, params: Record<string, unknown
   });
 }
 
-export async function fetchDartDocument(rceptNo: string, maxChars: number = 50000): Promise<unknown> {
+export async function fetchDartDocument(rceptNo: string, maxChars: number = 0): Promise<unknown> {
   return dartQueue(async () => {
     const key = getDartApiKey();
     const url = `${DART_BASE_URL}/document.xml?crtfc_key=${key}&rcept_no=${rceptNo}`;
@@ -417,7 +417,7 @@ server.tool(
   'DART 공시 접수번호(14자리)의 공시서류(ZIP)를 다운로드하여 텍스트 본문과 웹 링크를 반환합니다. (반환된 direct_url은 원문 열람 공식 링크입니다)',
   {
     rcept_no: z.string().regex(/^\d{14}$/, '14자리 숫자 접수번호여야 합니다 (예: 20240312000784).'),
-    max_chars: z.number().int().min(0).default(50000).describe('반환할 파일당 최대 글자 수 (기본값: 50000). 0으로 지정 시 제한 없이 전체 본문 반환.')
+    max_chars: z.number().int().min(0).default(0).describe('반환할 파일당 최대 글자 수 (기본값: 0, 제한 없이 원문 전체 반환). 특정 글자 수로 제한할 경우에만 양수로 지정.')
   },
   async ({ rcept_no, max_chars }) => safeTool(() => fetchDartDocument(rcept_no, max_chars))
 );
