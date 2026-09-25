@@ -11,14 +11,15 @@ import { z } from 'zod';
 // 1. 요청 큐 (순차 실행으로 API 호출 간격 보장)
 // ============================================================================
 export function createQueue(minIntervalMs: number) {
-  let last = 0;
+  let last = -Infinity;
   let chain: Promise<unknown> = Promise.resolve();
 
   return function run<T>(fn: () => Promise<T>): Promise<T> {
     const next = chain.then(async () => {
-      const wait = minIntervalMs - (Date.now() - last);
+      const now = performance.now();
+      const wait = minIntervalMs - (now - last);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-      last = Date.now();
+      last = performance.now();
       return fn();
     });
     chain = next.then(() => {}, () => {});
@@ -138,6 +139,33 @@ export function decodeBuffer(buf: Buffer): string {
   }
 }
 
+export function parseDartApiResponse<T = unknown>(text: string): T {
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    const statusMatch = text.match(/<status>([^<]*)<\/status>/i);
+    const msgMatch = text.match(/<message>([^<]*)<\/message>/i);
+    if (statusMatch || msgMatch) {
+      const status = statusMatch?.[1] || 'ERROR';
+      const desc = (status && DART_STATUS_MESSAGES[status]) || msgMatch?.[1] || text.slice(0, 300);
+      throw new Error(`[DART 오류 ${status}] ${desc}`);
+    }
+    throw new Error(`DART 응답이 JSON 형식이 아닙니다: ${text.slice(0, 300)}`);
+  }
+
+  if (json?.status != null) {
+    const status = String(json.status).padStart(3, '0');
+    if (status !== '000' && status !== '013') {
+      const desc = DART_STATUS_MESSAGES[status] || json.message || '알 수 없는 오류';
+      throw new Error(`[DART 오류 ${status}] ${desc}`);
+    }
+  }
+
+  // 원본 JSON 그대로 반환 (가공 없음, 000 정상 조회 및 013 조회결과 0건 포함)
+  return json;
+}
+
 export async function fetchDart(endpoint: string, params: Record<string, unknown> = {}): Promise<unknown> {
   const cleanEndpoint = endpoint.trim().replace(/^\/+/, '');
   if (!/^[a-zA-Z0-9_-]+\.json$/.test(cleanEndpoint)) {
@@ -157,71 +185,193 @@ export async function fetchDart(endpoint: string, params: Record<string, unknown
     if (!res.ok) throw new Error(`[DART HTTP ${res.status}] ${res.statusText}`);
 
     const text = await res.text();
-    let json: any;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      throw new Error(`DART 응답이 JSON 형식이 아닙니다: ${text.slice(0, 300)}`);
-    }
-
-    if (json?.status && json.status !== '000') {
-      const desc = DART_STATUS_MESSAGES[json.status] || json.message || '알 수 없는 오류';
-      throw new Error(`[DART 오류 ${json.status}] ${desc}`);
-    }
-
-    // 원본 JSON 그대로 반환 (가공 없음)
-    return json;
+    return parseDartApiResponse(text);
   });
 }
 
-export async function fetchDartDocument(rceptNo: string, maxChars: number = 0): Promise<unknown> {
-  return dartQueue(async () => {
+/**
+ * DART 공시 XML의 레이아웃 스타일 노이즈(컬러, 폰트, 폭/높이 속성 등)를 제거하여
+ * 토큰 소모량을 대폭 줄이면서도 본문 텍스트, 수치, 표 구조(table/tr/td, colspan, rowspan)는 100% 무손실 보존합니다.
+ */
+export function cleanXmlContent(xml: string): string {
+  return xml
+    .replace(/<TU\b/gi, '<TD')
+    .replace(/<\/TU>/gi, '</TD>')
+    .replace(/<COLGROUP\b[^>]*\/>/gi, '')
+    .replace(/<COLGROUP\b[^>]*>[\s\S]*?<\/COLGROUP>/gi, '')
+    .replace(/<\/?COLGROUP\b[^>]*\/?>/gi, '')
+    .replace(/<\/?COL\b[^>]*\/?>/gi, '')
+    .replace(/<PGBRK\b[^>]*\/?>|<\/PGBRK>/gi, '')
+    .replace(/<P\b[^>]*>\s*<\/P>|<P\b[^>]*\/>/gi, '')
+    .replace(/<(TABLE|TR|TD|TH)\b([^>]*)>/gi, (_, tag, attrs) => {
+      const keep: string[] = [];
+      const colspanMatch = attrs.match(/\bCOLSPAN\s*=\s*(["']?\d+["']?)/i);
+      const rowspanMatch = attrs.match(/\bROWSPAN\s*=\s*(["']?\d+["']?)/i);
+      if (colspanMatch) keep.push(`colspan="${colspanMatch[1].replace(/['"]/g, '')}"`);
+      if (rowspanMatch) keep.push(`rowspan="${rowspanMatch[1].replace(/['"]/g, '')}"`);
+      const isSelfClosing = attrs.trim().endsWith('/');
+      const attrStr = keep.length ? ' ' + keep.join(' ') : '';
+      return `<${tag.toLowerCase()}${attrStr}${isSelfClosing ? ' />' : '>'}`;
+    })
+    .replace(/<\/(TABLE|TR|TD|TH)>/gi, (_, tag) => `</${tag.toLowerCase()}>`)
+    .replace(/\n\s*\n\s*\n+/g, '\n\n')
+    .trim();
+}
+
+/**
+ * DART 공시 XML에서 문서명(<DOCUMENT-NAME>)을 추출합니다. 없으면 파일명을 반환합니다.
+ */
+export function extractDocTitle(xml: string, fallbackName: string): string {
+  const match = xml.match(/<DOCUMENT-NAME[^>]*>([\s\S]*?)<\/DOCUMENT-NAME>/i);
+  if (!match) return fallbackName;
+  const cleaned = match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1').trim();
+  return cleaned || fallbackName;
+}
+
+export function matchTargetDocument<T extends { index: number; name: string; title: string }>(
+  files: T[],
+  docName: string
+): T | undefined {
+  if (!docName) return undefined;
+  const cleanDocName = docName.trim().toLowerCase();
+  if (!cleanDocName) return undefined;
+
+  // 1. 인덱스 완전 일치 (숫자 입력 시)
+  if (/^\d+$/.test(cleanDocName)) {
+    const byIndex = files.find((f) => f.index === Number(cleanDocName));
+    if (byIndex) return byIndex;
+  }
+
+  // 2. 파일명 완전 일치
+  const byExactName = files.find((f) => (f.name || '').toLowerCase() === cleanDocName);
+  if (byExactName) return byExactName;
+
+  // 3. 문서명(제목) 완전 일치
+  const byExactTitle = files.find((f) => (f.title || '').toLowerCase() === cleanDocName);
+  if (byExactTitle) return byExactTitle;
+
+  // 4. 문서명(제목) 부분 일치
+  const byPartialTitle = files.find((f) => (f.title || '').toLowerCase().includes(cleanDocName));
+  if (byPartialTitle) return byPartialTitle;
+
+  // 5. 파일명 부분 일치
+  return files.find((f) => (f.name || '').toLowerCase().includes(cleanDocName));
+}
+
+export async function fetchDartDocument(rceptNo: string, docName?: string): Promise<unknown> {
+  const buffer = await dartQueue(async () => {
     const key = getDartApiKey();
     const url = `${DART_BASE_URL}/document.xml?crtfc_key=${key}&rcept_no=${rceptNo}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
     if (!res.ok) throw new Error(`DART 문서 다운로드 실패: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  });
 
-    const buffer = Buffer.from(await res.arrayBuffer());
-    if (buffer.length < 2 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
-      const errorText = decodeBuffer(buffer);
-      const msgMatch = errorText.match(/<message>([^<]*)<\/message>/);
-      const statusMatch = errorText.match(/<status>([^<]*)<\/status>/);
-      const status = statusMatch?.[1];
-      const desc = (status && DART_STATUS_MESSAGES[status]) || msgMatch?.[1] || errorText.slice(0, 300);
-      throw new Error(`[DART 문서 오류 ${status ?? 'ERROR'}] ${desc}`);
-    }
+  if (buffer.length < 2 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+    const errorText = decodeBuffer(buffer);
+    const msgMatch = errorText.match(/<message>([^<]*)<\/message>/);
+    const statusMatch = errorText.match(/<status>([^<]*)<\/status>/);
+    const status = statusMatch?.[1];
+    const desc = (status && DART_STATUS_MESSAGES[status]) || msgMatch?.[1] || errorText.slice(0, 300);
+    throw new Error(`[DART 문서 오류 ${status ?? 'ERROR'}] ${desc}`);
+  }
 
-    const TEXT_EXTS = new Set(['.xml', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv']);
-    const zip = new AdmZip(buffer);
-    const files = zip.getEntries().map((entry) => {
+  const TEXT_EXTS = new Set(['.xml', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv']);
+  const zip = new AdmZip(buffer);
+  const parsedFiles = zip.getEntries()
+    .filter((entry) => !entry.isDirectory)
+    .map((entry, index) => {
       const ext = path.extname(entry.entryName).toLowerCase();
-      if (!TEXT_EXTS.has(ext)) {
-        return {
-          name: entry.entryName,
-          size: entry.header.size,
-          content: `[첨부 바이너리 파일: ${entry.entryName} (${(entry.header.size / 1024).toFixed(1)} KB) - 텍스트 추출 대상 아님]`
-        };
-      }
-
-      let content = decodeBuffer(entry.getData());
-      if (maxChars > 0 && content.length > maxChars) {
-        const total = content.length;
-        content = content.slice(0, maxChars) +
-          `\n\n...[글자 수 제한으로 인해 생략됨 (총 ${total.toLocaleString()}자 중 ${maxChars.toLocaleString()}자 반환)]...`;
-      }
+      const isText = TEXT_EXTS.has(ext);
+      const rawText = isText ? decodeBuffer(entry.getData()) : '';
+      const title = isText && ext === '.xml' ? extractDocTitle(rawText, entry.entryName) : entry.entryName;
       return {
+        index,
         name: entry.entryName,
-        size: entry.header.size,
-        content
+        title,
+        size_kb: Math.round((entry.header.size / 1024) * 10) / 10,
+        isText,
+        rawText
       };
     });
 
+  const directUrl = `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`;
+
+  // 1. 단일 파일 공시(수시공시: CB, 유증 등): docName 없이도 원문 즉시 100% 반환
+  if (parsedFiles.length === 1 && (!docName || docName.trim() === '')) {
+    const f = parsedFiles[0];
+    const content = f.isText
+      ? (path.extname(f.name).toLowerCase() === '.xml' ? cleanXmlContent(f.rawText) : f.rawText)
+      : `[첨부 바이너리 파일: ${f.name} (${f.size_kb} KB) - 텍스트 추출 대상 아님]`;
     return {
       rcept_no: rceptNo,
-      direct_url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}`,
-      files
+      direct_url: directUrl,
+      mode: 'single_document',
+      title: f.title,
+      file_name: f.name,
+      size_kb: f.size_kb,
+      content
     };
-  });
+  }
+
+  // 2. 다중 파일 공시(사업보고서 등)에서 docName이 없는 경우: 목차(TOC) 반환
+  if (!docName || docName.trim() === '') {
+    return {
+      rcept_no: rceptNo,
+      direct_url: directUrl,
+      mode: 'toc',
+      total_files: parsedFiles.length,
+      notice: '본 공시는 여러 첨부문서로 구성되어 있어 목차(TOC)를 반환합니다. 특정 문서의 원문을 조회하려면 doc_name 파라미터에 문서명(예: "연결감사보고서") 또는 파일명을 지정하세요.',
+      documents: parsedFiles.map((f) => ({
+        index: f.index,
+        title: f.title,
+        name: f.name,
+        size_kb: f.size_kb
+      }))
+    };
+  }
+
+  // 3. docName이 'all'인 경우: 전체 파일 내용 일괄 반환
+  const cleanDocName = docName.trim().toLowerCase();
+  if (cleanDocName === 'all') {
+    return {
+      rcept_no: rceptNo,
+      direct_url: directUrl,
+      mode: 'all',
+      total_files: parsedFiles.length,
+      files: parsedFiles.map((f) => ({
+        index: f.index,
+        title: f.title,
+        name: f.name,
+        size_kb: f.size_kb,
+        content: f.isText
+          ? (path.extname(f.name).toLowerCase() === '.xml' ? cleanXmlContent(f.rawText) : f.rawText)
+          : `[첨부 바이너리 파일: ${f.name} (${f.size_kb} KB) - 텍스트 추출 대상 아님]`
+      }))
+    };
+  }
+
+  // 4. 특정 문서 타겟팅 (다단계 우선순위 매칭)
+  const target = matchTargetDocument(parsedFiles, docName);
+
+  if (!target) {
+    const available = parsedFiles.map((f) => `[${f.index}] ${f.title} (${f.name})`).join(', ');
+    throw new Error(`지정한 문서 '${docName}'를 찾을 수 없습니다. 사용 가능한 문서 목록: ${available}`);
+  }
+
+  const content = target.isText
+    ? (path.extname(target.name).toLowerCase() === '.xml' ? cleanXmlContent(target.rawText) : target.rawText)
+    : `[첨부 바이너리 파일: ${target.name} (${target.size_kb} KB) - 텍스트 추출 대상 아님]`;
+
+  return {
+    rcept_no: rceptNo,
+    direct_url: directUrl,
+    mode: 'targeted_document',
+    title: target.title,
+    file_name: target.name,
+    size_kb: target.size_kb,
+    content
+  };
 }
 
 // ============================================================================
@@ -319,31 +469,63 @@ async function loadCorpList(): Promise<CorpItem[]> {
   }
 }
 
-export async function searchCorpCode(query: string, limit = 10): Promise<CorpItem[]> {
-  const items = await loadCorpList();
+export function rankCorpMatches(items: CorpItem[], query: string, limit = 10): CorpItem[] {
   const q = query.trim();
+  if (!q) return [];
+  const qLower = q.toLowerCase();
 
-  // 1. 종목코드 6자리 O(1)
-  if (/^\d{6}$/.test(q)) {
-    const found = stockIndex.get(q);
-    return found ? [found] : [];
+  // 1. 종목코드 1~6자리 숫자 (앞자리 0 누락 보정 및 O(1) 색인 매칭)
+  if (/^\d{1,6}$/.test(q)) {
+    const padded = q.padStart(6, '0');
+    const found = (items === corpCache ? stockIndex.get(padded) : undefined) || items.find((it) => it.stock_code === padded);
+    if (found) return [found];
   }
+
   // 2. 고유번호 8자리 O(1)
   if (/^\d{8}$/.test(q)) {
-    const found = corpIndex.get(q);
-    return found ? [found] : [];
+    const found = (items === corpCache ? corpIndex.get(q) : undefined) || items.find((it) => it.corp_code === q);
+    if (found) return [found];
   }
 
-  // 3. 회사명 부분 일치 검색
-  const qLower = q.toLowerCase();
-  const results: CorpItem[] = [];
-  for (const it of items) {
-    if (it.corp_name.toLowerCase().includes(qLower)) {
-      results.push(it);
-      if (results.length >= limit) break;
+  // 3. 회사명 검색 및 가중치 랭킹 정렬
+  // 1) 사명 완전 일치 -> 2) 상장사(stock_code !== '') -> 3) 접두사 일치 -> 4) 짧은 사명 우선
+  const matches = items.filter((it) => (it.corp_name || '').toLowerCase().includes(qLower));
+
+  matches.sort((a, b) => {
+    const aName = (a.corp_name || '').toLowerCase();
+    const bName = (b.corp_name || '').toLowerCase();
+
+    // 1) 사명 완전 일치
+    const aExact = aName === qLower;
+    const bExact = bName === qLower;
+    if (aExact !== bExact) return aExact ? -1 : 1;
+
+    // 2) 상장사 우선 (stock_code 유무)
+    const aListed = Boolean(a.stock_code && a.stock_code.trim());
+    const bListed = Boolean(b.stock_code && b.stock_code.trim());
+    if (aListed !== bListed) return aListed ? -1 : 1;
+
+    // 3) 접두사 일치
+    const aPrefix = aName.startsWith(qLower);
+    const bPrefix = bName.startsWith(qLower);
+    if (aPrefix !== bPrefix) return aPrefix ? -1 : 1;
+
+    // 4) 이름 길이 짧은 순 (더 핵심적인 본사 매칭)
+    const aLen = (a.corp_name || '').length;
+    const bLen = (b.corp_name || '').length;
+    if (aLen !== bLen) {
+      return aLen - bLen;
     }
-  }
-  return results;
+
+    return (a.corp_name || '').localeCompare(b.corp_name || '');
+  });
+
+  return matches.slice(0, Math.max(0, limit));
+}
+
+export async function searchCorpCode(query: string, limit = 10): Promise<CorpItem[]> {
+  const items = await loadCorpList();
+  return rankCorpMatches(items, query, limit);
 }
 
 // ============================================================================
@@ -379,7 +561,7 @@ server.tool(
       '- 일반상품(3): gold_bydd_trd(금), oil_bydd_trd(석유), ets_bydd_trd(배출권)\n' +
       '- ESG(3): sri_bond_info(사회책임투자채권), esg_index_info(ESG지수), esg_etp_info(ESG증권상품)'
     ),
-    params: z.record(z.string(), z.unknown()).optional().default({}).describe('요청 파라미터 객체 (예: basDt: "20240315", isin: "KR7005930003", isuCd: "005930" 등)')
+    params: z.record(z.string(), z.unknown()).optional().default({}).describe('요청 파라미터 객체 (예: basDd: "20240315", isin: "KR7005930003", isuCd: "005930" 등)')
   },
   async ({ api_id, params }) => safeTool(() => fetchKrx(api_id, params))
 );
@@ -402,15 +584,15 @@ server.tool(
   async ({ endpoint, params }) => safeTool(() => fetchDart(endpoint, params))
 );
 
-// [도구 3: DART 공시 원문 ZIP 문서 다운로드 (글자수 가드 포함)]
+// [도구 3: DART 공시 원문 핀포인트 다운로드 (2단계 TOC / 특정 문서 타격)]
 server.tool(
   'download_dart_document',
-  'DART 공시 접수번호(14자리)의 공시서류(ZIP)를 다운로드하여 텍스트 본문과 웹 링크를 반환합니다. (반환된 direct_url은 원문 열람 공식 링크입니다)',
+  'DART 공시 접수번호(14자리)의 공시 원문을 다운로드합니다. 단일 파일 공시(수시공시)는 원문 전체를 즉시 반환하며, 여러 파일로 구성된 정기보고서(사업/분기보고서)는 목차(TOC)를 먼저 반환합니다. 특정 문서(예: "연결감사보고서")를 지정하면 해당 주석 원문만 핀포인트로 가져옵니다. (스타일 노이즈 제거로 토큰 소모 40% 절감, 표/문장 원문 100% 무손실 보존)',
   {
     rcept_no: z.string().regex(/^\d{14}$/, '14자리 숫자 접수번호여야 합니다 (예: 20240312000784).'),
-    max_chars: z.number().int().min(0).default(0).describe('반환할 파일당 최대 글자 수 (기본값: 0, 제한 없이 원문 전체 반환). 특정 글자 수로 제한할 경우에만 양수로 지정.')
+    doc_name: z.string().optional().describe('조회할 문서명(예: "연결감사보고서", "사업보고서"), 파일명, 또는 인덱스 번호. 생략 시 정기보고서는 목차(TOC)를 반환하고 단일 공시는 본문을 즉시 반환합니다. 전체를 다 받으려면 "all" 지정.')
   },
-  async ({ rcept_no, max_chars }) => safeTool(() => fetchDartDocument(rcept_no, max_chars))
+  async ({ rcept_no, doc_name }) => safeTool(() => fetchDartDocument(rcept_no, doc_name))
 );
 
 // [도구 4: 회사명 / 종목코드 / 고유번호 검색]

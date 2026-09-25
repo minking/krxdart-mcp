@@ -15,7 +15,7 @@
 | `search_corp_code` | DART 고유번호 파일(`corpCode.xml`) 기반 회사명, 6자리 종목코드, 8자리 고유번호 검색 (인메모리 캐싱) | `query` (회사명/종목코드/고유번호, 필수), `limit` (기본값 10) |
 | `call_dart_api` | Open DART 공식 JSON 엔드포인트 70여 개 원본 호출 (재무제표, 기업개황, 공시목록, 배당, 지분 등) | `endpoint` (파일명, 예: `company.json`, `fnlttSinglAcnt.json`), `params` (DART 요청 파라미터 객체) |
 | `call_krx_api` | 한국거래소(KRX) 공식 31개 OpenAPI 서비스 원본 호출 (일별시세, 종목기본정보, 지수, ETF, 채권 등) | `api_id` (KRX 서비스 ID, 예: `stk_bydd_trd`), `params` (KRX 요청 파라미터 객체, 예: `basDd`) |
-| `download_dart_document` | DART 접수번호(14자리)의 공시 서류(ZIP)를 다운로드하여 텍스트 본문 추출 및 다이렉트 웹 링크 반환 | `rcept_no` (14자리 접수번호, 필수), `max_chars` (최대 글자 수, 기본값 0[제한 없음], 양수 지정 시 해당 글자 수로 제한) |
+| `download_dart_document` | DART 접수번호(14자리)의 공시 서류(ZIP)를 다운로드하여 텍스트 본문 추출 및 다이렉트 웹 링크 반환 (단일 공시는 본문 즉시 반환, 정기보고서는 목차 TOC 반환 후 핀포인트 조회 지원) | `rcept_no` (14자리 접수번호, 필수), `doc_name` (문서명/파일명/인덱스, 선택, 전체는 "all") |
 
 ---
 
